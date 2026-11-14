@@ -28,8 +28,8 @@ from telegram.ext import (
 
 # ================= الإعدادات =================
 load_dotenv()
-TOKEN = "9065174452:AAHROsaMzGQ5ZPHjwBUiO10mgA5T3HGSuTY"
-OWNER_ID = "8949099540"
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 TZ = ZoneInfo("Africa/Cairo")
 DB_FILE = os.getenv("DB_FILE", "clients.db")
 REMINDER_HOUR_DEFAULT = 9
