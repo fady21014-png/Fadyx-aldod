@@ -8,8 +8,8 @@
     pip install "python-telegram-bot[job-queue]>=21" python-dotenv
 
 ملف .env:
-    BOT_TOKEN= "9065174452:AAHROsaMzGQ5ZPHjwBUiO10mgA5T3HGSuTY"
-    OWNER_ID= "8949099540"
+    BOT_TOKEN=توكن_البوت
+    OWNER_ID=رقم_الآيدي_بتاعك
     DB_FILE=clients.db   (اختياري)
 """
 import asyncio
@@ -51,7 +51,7 @@ except ValueError:
     OWNER_ID = 0
 
 TZ = ZoneInfo("Africa/Cairo")
-DB_FILE = os.getenv("DB_FILE", "clients.db")
+DB_FILE = os.getenv("DB_FILE") or ("/data/clients.db" if os.path.isdir("/data") else "clients.db")
 DEFAULT_HOUR = 9
 BILL_DAYS = (4, 16)
 
