@@ -30,7 +30,8 @@ from telegram.ext import (
 # ================= الإعدادات الأساسية =================
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "8853934310:AAHQ0FEd7oECal5f3sdd61MeD_gvRyBhsZ4").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+# ضع رقم الآيدي الخاص بك هنا مباشرة لضمان وصول الإشعارات لك فوراً بدون خطأ
+OWNER_ID = int(os.getenv("OWNER_ID", "0")) 
 TZ = ZoneInfo("Africa/Cairo")
 DB_FILE = os.getenv("DB_FILE", "clients.db")
 REMINDER_HOUR_DEFAULT = 9
@@ -104,7 +105,7 @@ def set_setting(k, v):
     run("INSERT OR REPLACE INTO settings(k, v) VALUES(?, ?)", (k, v))
 
 def owner_id():
-    if OWNER_ID:
+    if OWNER_ID != 0:
         return OWNER_ID
     v = get_setting("owner")
     return int(v) if v else None
@@ -114,7 +115,7 @@ async def allowed(update: Update) -> bool:
     owner = owner_id()
     if owner is None:
         set_setting("owner", str(uid))
-        return True
+        return uid
     return uid == owner
 
 # ================= الأدوات المساعدة =================
@@ -156,6 +157,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     owner = owner_id()
     
+    # إذا كان هو الأونر (أنت)
     if owner and uid == owner:
         await update.message.reply_text(
             "أهلاً بيك يا فادي يا هندسة 👋\nأنت في لوحة التحكم الرئيسية:",
@@ -163,6 +165,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # إذا كان عميل جديد
     ctx.user_data.clear()
     ctx.user_data["step"] = "client_number"
     await update.message.reply_text(
@@ -173,8 +176,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
-        return
+    if uid := update.effective_user.id:
+        if owner_id() and uid != owner_id():
+            return
     ctx.user_data.clear()
     cyc = cycle(now_local())
     rows = run("SELECT * FROM clients ORDER BY bill_day, number")
@@ -195,7 +199,7 @@ async def show_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_unpaid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    if owner_id() and update.effective_user.id != owner_id():
         return
     ctx.user_data.clear()
     rows = run("SELECT * FROM clients WHERE paid_cycle!=? ORDER BY bill_day", (cycle(now_local()),))
@@ -205,7 +209,7 @@ async def show_unpaid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ لسه ما دفعوش: *{len(rows)}* عميل", parse_mode=ParseMode.MARKDOWN)
 
 async def delete_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    if owner_id() and update.effective_user.id != owner_id():
         return
     if not ctx.args:
         await update.message.reply_text("اكتب: `/del رقم_العميل`", parse_mode=ParseMode.MARKDOWN)
@@ -222,7 +226,7 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("تم إلغاء العملية. يمكنك إرسال `/start` للبدء من جديد.")
 
-# ================= معالجة خطوات الزبون =================
+# ================= معالجة خطوات الزبون (محدثة لضمان التقاط الباقة بدقة) =================
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     owner = owner_id()
@@ -245,13 +249,21 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif step == "client_package":
         pkg_idx = None
-        nums = re.findall(r"\d+", text)
-        
+        # مطابقة دقيقة بناءً على نص الزر أو الأرقام الموجودة فيه
         for i, (p_name, p_price) in enumerate(PACKAGES):
-            if any(n in p_name or str(p_price) == n for n in nums):
+            label = pkg_label(i).translate(AR_DIGITS)
+            if label in text or str(p_price) in text:
                 pkg_idx = i
                 break
         
+        if pkg_idx is None:
+            # مطابقة احتياطية بالأرقام لو فشلت المطابقة النصية
+            nums = re.findall(r"\d+", text)
+            for i, (p_name, p_price) in enumerate(PACKAGES):
+                if any(str(p_price) == n or n in p_name for n in nums):
+                    pkg_idx = i
+                    break
+
         if pkg_idx is None:
             await update.message.reply_text("من فضلك اختر باقة صحيحة من الأزرار الموجودة أدناه.")
             return
@@ -259,6 +271,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         number = ctx.user_data["client_number"]
         username = f"@{update.effective_user.username}" if update.effective_user.username else f"ID: {uid}"
         
+        # حفظ الطلب في قاعدة البيانات
         run(
             "INSERT INTO pending_requests(user_id, username, number, package_idx, created_at) VALUES(?,?,?,?,?)",
             (uid, username, number, pkg_idx, naive_iso(now_local()))
@@ -267,6 +280,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         ctx.user_data.clear()
         
+        # رسالة للزبون
         await update.message.reply_text(
             "⏳ *تم إرسال طلب اشتراكك بنجاح!*\n\n"
             "جاري مراجعة الطلب من الإدارة، سيتم إعلامك فور قبول اشتراكك وتفعيله.",
@@ -274,7 +288,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=types.ReplyKeyboardRemove()
         )
 
-        if owner:
+        # إرسال الإشعار الفوري لك (الأونر)
+        target_owner = owner if owner else uid # كضمان لو لم يتم تحديد الأونر بعد
+        if target_owner:
             p_name, p_price = PACKAGES[pkg_idx]
             approval_markup = Markup([
                 [
@@ -282,18 +298,22 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     Btn("❌ رفض", callback_data=f"reject:{req_id}")
                 ]
             ])
-            await ctx.bot.send_message(
-                owner,
-                f"🚨 *طلب اشتراك جديد قيد الانتظار!*\n\n"
-                f"👤 المستخدم: {username} (ID: `{uid}`)\n"
-                f"📱 الرقم: `{number}`\n"
-                f"📦 الباقة: {p_name} ({p_price} جنيه)\n"
-                f"{stamp_line()}",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=approval_markup
-            )
+            try:
+                await ctx.bot.send_message(
+                    target_owner,
+                    f"🚨 *طلب اشتراك جديد قيد الانتظار!*\n\n"
+                    f"👤 المستخدم: {username} (ID: `{uid}`)\n"
+                    f"📱 الرقم: `{number}`\n"
+                    f"📦 الباقة: {p_name} ({p_price} جنيه)\n"
+                    f"{stamp_line()}",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=approval_markup
+                )
+            except Exception as e:
+                log.error(f"Failed to send notification to owner: {e}")
         return
 
+    # إدارة الأونر اليدوية
     if owner and uid == owner:
         admin_step = ctx.user_data.get("admin_step")
         if admin_step == "number":
@@ -303,7 +323,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ================= زر إضافة عميل يدوي للأونر =================
 async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    if owner_id() and update.effective_user.id != owner_id():
         return
     ctx.user_data.clear()
     ctx.user_data["admin_step"] = "number"
@@ -311,8 +331,6 @@ async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ================= معالجة أزرار الموافقة والرفض من الأونر =================
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
-        return
     q = update.callback_query
     await q.answer()
     parts = q.data.split(":")
@@ -377,7 +395,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ================= الإحصائيات والتصدير =================
 async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    if owner_id() and update.effective_user.id != owner_id():
         return
     cyc = cycle(now_local())
     all_rows = run("SELECT * FROM clients")
@@ -387,7 +405,7 @@ async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def export_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    if owner_id() and update.effective_user.id != owner_id():
         return
     rows = run("SELECT * FROM clients")
     buf = io.StringIO()
