@@ -222,7 +222,7 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("تم إلغاء العملية. يمكنك إرسال `/start` للبدء من جديد.")
 
-# ================= معالجة خطوات الزبون (محدثة لتعمل بدقة) =================
+# ================= معالجة خطوات الزبون =================
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     owner = owner_id()
@@ -244,12 +244,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     elif step == "client_package":
-        # مطابقة ذكية للباقة بناءً على الأرقام الموجودة في النص (الجيجابايت أو السعر)
         pkg_idx = None
         nums = re.findall(r"\d+", text)
         
         for i, (p_name, p_price) in enumerate(PACKAGES):
-            # مطابقة عبر اسم الباقة أو السعر أو رقم الجيجا المستخرج
             if any(n in p_name or str(p_price) == n for n in nums):
                 pkg_idx = i
                 break
@@ -261,7 +259,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         number = ctx.user_data["client_number"]
         username = f"@{update.effective_user.username}" if update.effective_user.username else f"ID: {uid}"
         
-        # حفظ الطلب في جدول المعلقة (Pending)
         run(
             "INSERT INTO pending_requests(user_id, username, number, package_idx, created_at) VALUES(?,?,?,?,?)",
             (uid, username, number, pkg_idx, naive_iso(now_local()))
@@ -270,7 +267,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         ctx.user_data.clear()
         
-        # إرسال رسالة للزبون أن طلبه قيد المراجعة
         await update.message.reply_text(
             "⏳ *تم إرسال طلب اشتراكك بنجاح!*\n\n"
             "جاري مراجعة الطلب من الإدارة، سيتم إعلامك فور قبول اشتراكك وتفعيله.",
@@ -278,7 +274,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=types.ReplyKeyboardRemove()
         )
 
-        # إرسال إشعار فوري لك (الأونر) في شات البوت مع أزرار الموافقة والرفض
         if owner:
             p_name, p_price = PACKAGES[pkg_idx]
             approval_markup = Markup([
@@ -299,7 +294,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # إدارة الأونر اليدوية لو أضاف عميل من لوحة التحكم
     if owner and uid == owner:
         admin_step = ctx.user_data.get("admin_step")
         if admin_step == "number":
@@ -315,7 +309,7 @@ async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["admin_step"] = "number"
     await update.message.reply_text("أدخل رقم العميل:", reply_markup=CANCEL_KB)
 
-# ================= معالجة أزرار الموافقة والرفض من الأونر (Callback) =================
+# ================= معالجة أزرار الموافقة والرفض من الأونر =================
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
@@ -337,7 +331,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     p_name, p_price = PACKAGES[pkg_idx]
 
     if action == "approve":
-        bill_day = 4  # يوم المحاسبة الافتراضي
+        bill_day = 4
         
         run(
             "INSERT INTO clients(number, package, price, bill_day, chat_id, created_at) VALUES(?,?,?,?,?,?)",
@@ -418,7 +412,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ADD}$"), add_start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_LIST}$"), show_list))
-    app.add_handler(MessageHandler(filters.Regex(f^{BTN_UNPAID}$"), show_unpaid))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_UNPAID}$"), show_unpaid))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_STATS}$"), show_stats))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_EXPORT}$"), export_csv))
 
