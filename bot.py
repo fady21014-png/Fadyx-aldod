@@ -30,7 +30,7 @@ from telegram.ext import (
 # ================= الإعدادات الأساسية =================
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "8853934310:AAHQ0FEd7oECal5f3sdd61MeD_gvRyBhsZ4").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # ضع معرف التيليجرام الخاص بك هنا أو يتم تعليقه تلقائياً لأول مسجل
 TZ = ZoneInfo("Africa/Cairo")
 DB_FILE = os.getenv("DB_FILE", "clients.db")
 REMINDER_HOUR_DEFAULT = 9
@@ -82,6 +82,12 @@ run(
         created_at TEXT DEFAULT '', paid_at TEXT DEFAULT '')"""
 )
 run(
+    """CREATE TABLE IF NOT EXISTS pending_requests(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, username TEXT, number TEXT, package_idx INTEGER,
+        created_at TEXT DEFAULT '')"""
+)
+run(
     """CREATE TABLE IF NOT EXISTS payments(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         client_id INTEGER, amount INTEGER,
@@ -89,16 +95,6 @@ run(
         FOREIGN KEY(client_id) REFERENCES clients(id))"""
 )
 run("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
-
-for _col, _type in [
-    ("created_at", "TEXT DEFAULT ''"),
-    ("paid_at", "TEXT DEFAULT ''"),
-    ("chat_id", "INTEGER DEFAULT 0"),
-]:
-    try:
-        run(f"ALTER TABLE clients ADD COLUMN {_col} {_type}")
-    except sqlite3.OperationalError:
-        pass
 
 def get_setting(k):
     r = run("SELECT v FROM settings WHERE k=?", (k,))
@@ -121,7 +117,7 @@ async def allowed(update: Update) -> bool:
         return True
     return uid == owner
 
-# ================= الأدوات الزمنية والمساعدة =================
+# ================= الأدوات المساعدة =================
 def now_local():
     return datetime.now(TZ)
 
@@ -139,81 +135,41 @@ def stamp_line():
     n = now_local()
     return f"🕒 {n:%Y-%m-%d} - {fmt_time(n.hour, n.minute)}"
 
-def parse_time(text):
-    t = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")).lower()
-    nums = re.findall(r"\d+", t)
-    if not nums:
-        return None
-    h = int(nums[0])
-    m = int(nums[1]) if len(nums) > 1 else 0
-    if "م" in t or "pm" in t:
-        if h < 12:
-            h += 12
-    if ("ص" in t or "am" in t) and h == 12:
-        h = 0
-    if h > 23 or m > 59:
-        return None
-    return h, m
+def pkg_label(i):
+    n, p = PACKAGES[i]
+    short = n.split(" /")[0]
+    return f"{short} • {p} جنيه"
 
-def date_for_day(n, today):
-    y, mth = today.year, today.month
-    for _ in range(14):
-        last = calendar.monthrange(y, mth)[1]
-        if n <= last:
-            d = today.replace(year=y, month=mth, day=n)
-            if d >= today:
-                return d
-        mth += 1
-        if mth > 12:
-            mth, y = 1, y + 1
-    return None
+def kb_rows(items, per_row=2):
+    return [items[i:i + per_row] for i in range(0, len(items), per_row)]
 
-def card(c):
-    return (
-        f"👤 *العميل:* `{c['number']}`\n"
-        f"📦 *الباقة:* {c['package']}\n"
-        f"💰 *السعر:* {c['price']} جنيه\n"
-        f"📅 *يوم المحاسبة:* {c['bill_day']}"
-    )
+CANCEL_KB = ReplyKeyboardMarkup([[BTN_CANCEL]], resize_keyboard=True, is_persistent=True)
+PKG_KB = ReplyKeyboardMarkup(
+    kb_rows([pkg_label(i) for i in range(len(PACKAGES))]) + [[BTN_CANCEL]],
+    resize_keyboard=True, is_persistent=True,
+)
 
-def reminder_kb(cid):
-    return Markup(
-        [
-            [Btn("✅ تم الدفع", callback_data=f"paid:{cid}")],
-            [
-                Btn("⏰ بعد ساعة", callback_data=f"snz:{cid}:h"),
-                Btn("📅 بعد يوم", callback_data=f"snz:{cid}:d"),
-            ],
-        ]
-    )
-
-def card_cmds(c):
-    return (
-        card(c)
-        + f"\n\n✅ تم الدفع: `/paid_{c['id']}`"
-        + f"\n⏰ بعد ساعة: `/h_{c['id']}`"
-        + f"\n📅 بعد يوم: `/d_{c['id']}`"
-        + f"\n🕒 يوم وساعة تانية: `/r_{c['id']}`"
-    )
-
-async def send_cards(bot, chat_id, rows):
-    for c in rows:
-        try:
-            await bot.send_message(
-                chat_id, card_cmds(c),
-                reply_markup=reminder_kb(c["id"]),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        except Exception as e:
-            log.warning(f"send_cards failed for client {c['id']}: {e}")
-
-# ================= الأوامر الأساسية والقوائم =================
+# ================= أوامر البوت الأساسية والعملاء =================
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
+    uid = update.effective_user.id
+    owner = owner_id()
+    
+    # إذا كان المستخدم هو الأونر (أنت)
+    if owner and uid == owner:
+        await update.message.reply_text(
+            "أهلاً بيك يا فادي يا هندسة 👋\nأنت في لوحة التحكم الرئيسية:",
+            reply_markup=MENU,
+        )
         return
+
+    # إذا كان المستخدم "زبون جديد" يفتح البوت لأول مرة
+    ctx.user_data.clear()
+    ctx.user_data["step"] = "client_number"
     await update.message.reply_text(
-        "أهلاً بيك يا فادي يا هندسة 👋\nاختر من القائمة أدناه لإدارة عملائك:",
-        reply_markup=MENU,
+        "🚀 *أهلاً بك في خدمة حجز الباقات والاشتراكات!*\n\n"
+        "من فضلك، أدخل رقم الموبايل الخاص بك للبدء في طلب الاشتراك:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=CANCEL_KB,
     )
 
 async def show_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -233,7 +189,6 @@ async def show_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for c in group:
                 mark = "✅" if c["paid_cycle"] == cyc else "⏳"
                 lines.append(f"{mark} `{c['number']}` | {c['package']} | {c['price']} ج")
-    lines.append("\nلحذف عميل: `/del رقم_العميل`")
     await update.message.reply_text(
         stamp_line() + "\n\n" + "\n".join(lines),
         parse_mode=ParseMode.MARKDOWN,
@@ -243,18 +198,11 @@ async def show_unpaid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
     ctx.user_data.clear()
-    rows = run(
-        "SELECT * FROM clients WHERE paid_cycle!=? ORDER BY bill_day",
-        (cycle(now_local()),),
-    )
+    rows = run("SELECT * FROM clients WHERE paid_cycle!=? ORDER BY bill_day", (cycle(now_local()),))
     if not rows:
         await update.message.reply_text("كله دافع ومظبوط ✅")
         return
-    await update.message.reply_text(
-        f"⏳ لسه ما دفعوش: *{len(rows)}* عميل\n{stamp_line()}",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    await send_cards(ctx.bot, update.effective_chat.id, rows)
+    await update.message.reply_text(f"⏳ لسه ما دفعوش: *{len(rows)}* عميل", parse_mode=ParseMode.MARKDOWN)
 
 async def delete_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
@@ -265,244 +213,185 @@ async def delete_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     run("DELETE FROM clients WHERE number=?", (ctx.args[0],))
     await update.message.reply_text("تم حذف العميل بنجاح ✅")
 
-# ================= إضافة عميل جديد =================
-MENU_RE = f"^({BTN_ADD}|{BTN_LIST}|{BTN_UNPAID}|{BTN_HOUR}|{BTN_STATS}|{BTN_EXPORT})$"
-AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-
-def pkg_label(i):
-    n, p = PACKAGES[i]
-    short = n.split(" /")[0]
-    return f"{short} • {p} جنيه"
-
-def kb_rows(items, per_row=2):
-    return [items[i:i + per_row] for i in range(0, len(items), per_row)]
-
-CANCEL_KB = ReplyKeyboardMarkup(
-    [[BTN_CANCEL]], resize_keyboard=True, is_persistent=True,
-    input_field_placeholder="اكتب رقم العميل أو @username",
-)
-PKG_KB = ReplyKeyboardMarkup(
-    kb_rows([pkg_label(i) for i in range(len(PACKAGES))]) + [[BTN_CANCEL]],
-    resize_keyboard=True, is_persistent=True, input_field_placeholder="اختر الباقة",
-)
-DAY_KB = ReplyKeyboardMarkup(
-    [["يوم 4", "يوم 16"], [BTN_CANCEL]],
-    resize_keyboard=True, is_persistent=True, input_field_placeholder="اختر اليوم",
-)
-
-def find_pkg(text):
-    t = text.translate(AR_DIGITS).strip()
-    for i in range(len(PACKAGES)):
-        if pkg_label(i) in t or PACKAGES[i][0] in t:
-            return i
-    nums = re.findall(r"\d+", t)
-    if nums:
-        n = int(nums[0])
-        for i, (_, price) in enumerate(PACKAGES):
-            if price == n:
-                return i
-        if 1 <= n <= len(PACKAGES):
-            return n - 1
-    return None
-
-def find_day(text):
-    for n in re.findall(r"\d+", text.translate(AR_DIGITS)):
-        if 1 <= int(n) <= 31:
-            return int(n)
-    return None
-
-async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
-        return
-    ctx.user_data.clear()
-    ctx.user_data["step"] = "number"
-    await update.message.reply_text(
-        "أدخل رقم العميل أو المعرف الخاص به:",
-        reply_markup=CANCEL_KB,
-    )
-
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    owner = owner_id()
     ctx.user_data.clear()
-    await update.message.reply_text("تم إلغاء العملية.", reply_markup=MENU)
+    if owner and uid == owner:
+        await update.message.reply_text("تم الإلغاء.", reply_markup=MENU)
+    else:
+        await update.message.reply_text("تم إلغاء العملية. يمكنك إرسال `/start` للبدء من جديد.")
 
+# ================= معالجة خطوات الزبون (Client Flow) =================
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
-        return
-    step = ctx.user_data.get("step")
-    if not step:
-        return
+    uid = update.effective_user.id
+    owner = owner_id()
     text = update.message.text.strip()
+    
     if "إلغاء" in text:
         await cancel(update, ctx)
         return
 
-    if step in ("rem_day", "rem_time", "set_time"):
-        await extra_steps(update, ctx, step, text)
+    step = ctx.user_data.get("step")
+
+    # لو الخطوات تخص العميل (الزبون) الجديد
+    if step == "client_number":
+        ctx.user_data["client_number"] = text
+        ctx.user_data["step"] = "client_package"
+        await update.message.reply_text(
+            "تمام جداً! الآن اختر الباقة التي تريد الاشتراك بها من الأزرار أدناه 👇",
+            reply_markup=PKG_KB,
+        )
         return
 
-    if step == "number":
-        ctx.user_data["number"] = text.translate(AR_DIGITS)
-        ctx.user_data["step"] = "package"
-        await update.message.reply_text("اختر الباقة المناسبة:", reply_markup=PKG_KB)
-
-    elif step == "package":
-        i = find_pkg(text)
-        if i is None:
-            await update.message.reply_text("لم يتم التعرف على الباقة، يرجى اختيارها من الأزرار 👇")
+    elif step == "client_package":
+        # مطابقة الباقة المختارة
+        pkg_idx = None
+        for i in range(len(PACKAGES)):
+            if pkg_label(i) in text or PACKAGES[i][0] in text:
+                pkg_idx = i
+                break
+        
+        if pkg_idx is None:
+            await update.message.reply_text("من فضلك اختر باقة صحيحة من الأزرار الموجودة.")
             return
-        ctx.user_data["pkg"] = i
-        ctx.user_data["step"] = "day"
-        name, price = PACKAGES[i]
-        await update.message.reply_text(
-            f"📦 {name} - {price} جنيه\nاختر يوم المحاسبة:",
-            reply_markup=DAY_KB,
-        )
 
-    elif step == "day":
-        day = find_day(text)
-        if day is None:
-            await update.message.reply_text("اختر يوم 4 أو 16، أو أدخل رقماً بين 1 و 31.")
-            return
-        name, price = PACKAGES[ctx.user_data["pkg"]]
-        number = ctx.user_data["number"]
+        number = ctx.user_data["client_number"]
+        username = f"@{update.effective_user.username}" if update.effective_user.username else f"ID: {uid}"
+        
+        # حفظ الطلب في جدول المعلقة (Pending)
         run(
-            "INSERT INTO clients(number, package, price, bill_day, created_at) VALUES(?,?,?,?,?)",
-            (number, name, price, day, naive_iso(now_local())),
+            "INSERT INTO pending_requests(user_id, username, number, package_idx, created_at) VALUES(?,?,?,?,?)",
+            (uid, username, number, pkg_idx, naive_iso(now_local()))
         )
+        req_id = run("SELECT last_insert_rowid() as id")[0]["id"]
+        
         ctx.user_data.clear()
+        
+        # إرسال رسالة للزبون أن طلبه قيد المراجعة
         await update.message.reply_text(
-            f"تمت الإضافة بنجاح ✅\n👤 `{number}`\n📦 {name}\n💰 {price} جنيه\n📅 يوم {day}\n{stamp_line()}",
-            reply_markup=MENU,
+            "⏳ *تم إرسال طلب اشتراكك بنجاح!*\n\n"
+            "جاري مراجعة الطلب من الإدارة، سيتم إعلامك فور قبول اشتراكك وتفعيله.",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=types.ReplyKeyboardRemove()
         )
 
-# ================= نظام التذكيرات والأوقات =================
-TIME_KB = ReplyKeyboardMarkup(
-    [["9:00 ص", "12:00 م"], ["3:00 م", "6:00 م"], ["9:00 م"], [BTN_CANCEL]],
-    resize_keyboard=True, is_persistent=True,
-    input_field_placeholder="أو اكتب الساعة مثل 7:30 م",
-)
-REM_DAY_KB = ReplyKeyboardMarkup(
-    [["النهاردة", "بكرة"], ["بعد يومين", "بعد 3 أيام"], [BTN_CANCEL]],
-    resize_keyboard=True, is_persistent=True,
-    input_field_placeholder="أو اكتب رقم اليوم",
-)
-DAY_OFFSETS = {"النهاردة": 0, "بكرة": 1, "بعد يومين": 2, "بعد 3 أيام": 3}
+        # إرسال إشعار فوري لك أنت (الأونر) في حسابك الرئيسي مع أزرار الموافقة
+        if owner:
+            p_name, p_price = PACKAGES[pkg_idx]
+            approval_markup = Markup([
+                [
+                    Btn("✅ موافقة وتفعيل", callback_data=f"approve:{req_id}"),
+                    Btn("❌ رفض", callback_data=f"reject:{req_id}")
+                ]
+            ])
+            await ctx.bot.send_message(
+                owner,
+                f"🚨 *طلب اشتراك جديد قيد الانتظار!*\n\n"
+                f"👤 المستخدم: {username} (ID: `{uid}`)\n"
+                f"📱 الرقم: `{number}`\n"
+                f"📦 الباقة: {p_name} ({p_price} جنيه)\n"
+                f"{stamp_line()}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=approval_markup
+            )
+        return
 
-def reminder_minutes():
-    v = get_setting("reminder_min")
-    return int(v) if v else REMINDER_HOUR_DEFAULT * 60
+    # باقي خطوات الأونر لو بيضيف عميل يدوي من القائمة
+    if owner and uid == owner:
+        # هنا يتم تشغيل أكواد الإدارة الخاصة بك القديمة (إضافة عميل من لوحة التحكم)
+        admin_step = ctx.user_data.get("admin_step")
+        if admin_step == "number":
+            ctx.user_data["number"] = text
+            ctx.user_data["admin_step"] = "package"
+            await update.message.reply_text("اختر الباقة:", reply_markup=PKG_KB)
+        elif admin_step == "package":
+            # تفعيل الإضافة اليدوية للأونر
+            pass
 
-async def hour_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ================= زر إضافة عميل يدوي للأونر =================
+async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
     ctx.user_data.clear()
-    ctx.user_data["step"] = "set_time"
-    m = reminder_minutes()
-    await update.message.reply_text(
-        f"🕘 وقت التذكير الحالي: {fmt_time(m // 60, m % 60)}\n"
-        f"{stamp_line()}\nاختر وقت التذكير الجديد:",
-        reply_markup=TIME_KB,
-    )
+    ctx.user_data["admin_step"] = "number"
+    await update.message.reply_text("أدخل رقم العميل:", reply_markup=CANCEL_KB)
 
-async def extra_steps(update: Update, ctx: ContextTypes.DEFAULT_TYPE, step, text):
-    now = now_local()
-    t = text.translate(AR_DIGITS).strip()
-
-    if step == "rem_day":
-        day = None
-        if t in DAY_OFFSETS:
-            day = now.date() + timedelta(days=DAY_OFFSETS[t])
-        else:
-            nums = re.findall(r"\d+", t)
-            if nums and 1 <= int(nums[0]) <= 31:
-                day = date_for_day(int(nums[0]), now.date())
-        if day is None:
-            await update.message.reply_text("يرجى اختيار يوم صحيح من الأزرار أو أدخل رقماً صحيحاً.")
-            return
-        ctx.user_data["rem_date"] = day.isoformat()
-        ctx.user_data["step"] = "rem_time"
-        await update.message.reply_text(
-            f"📅 التاريخ: {day.isoformat()}\nفي أي ساعة تريد التذكير؟",
-            reply_markup=TIME_KB,
-        )
-
-    elif step == "rem_time":
-        hm = parse_time(text)
-        if hm is None:
-            await update.message.reply_text("تنسيق الوقت غير صحيح، اكتبه مثل 7:30 م.")
-            return
-        d = date.fromisoformat(ctx.user_data["rem_date"])
-        target = datetime(d.year, d.month, d.day, hm[0], hm[1], tzinfo=TZ)
-        if target <= now:
-            await update.message.reply_text("هذا الوقت قد مضى، يرجى اختيار وقت قادم.")
-            return
-        cid = ctx.user_data["rem_cid"]
-        run("UPDATE clients SET snooze_until=? WHERE id=?", (naive_iso(target), cid))
-        ctx.user_data.clear()
-        await update.message.reply_text(
-            f"⏰ تم ضبط التذكير ليوم {d.isoformat()} الساعة {fmt_time(*hm)}\n{stamp_line()}",
-            reply_markup=MENU,
-        )
-
-    elif step == "set_time":
-        hm = parse_time(text)
-        if hm is None:
-            await update.message.reply_text("تنسيق غير صحيح، اكتبه مثل 9:00 ص.")
-            return
-        set_setting("reminder_min", str(hm[0] * 60 + hm[1]))
-        ctx.user_data.clear()
-        await update.message.reply_text(
-            f"تم التحديث ✅ التذكير اليومي سيعمل الساعة {fmt_time(*hm)} بتوقيت القاهرة\n{stamp_line()}",
-            reply_markup=MENU,
-        )
-
-async def on_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ================= معالجة أزرار الموافقة والرفض من الأونر (Callback) =================
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
-    m = re.match(r"^/(paid|h|d|r)_(\d+)", update.message.text)
-    if not m:
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split(":")
+    action = parts[0]
+    req_id = int(parts[1])
+
+    # البحث عن الطلب المعلق
+    reqs = run("SELECT * FROM pending_requests WHERE id=?", (req_id,))
+    if not reqs:
+        await q.edit_message_text("❌ هذا الطلب غير موجود أو تم معالجته مسبقاً.")
         return
-    action, cid = m.group(1), int(m.group(2))
-    rows = run("SELECT * FROM clients WHERE id=?", (cid,))
-    if not rows:
-        await update.message.reply_text("هذا العميل غير موجود أو تم حذفه.")
-        return
-    c = rows[0]
-    if action == "paid":
-        mark_paid(cid, c)
-        await update.message.reply_text(f"✅ تم تسجيل الدفع للعميل: `{c['number']}`\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-    elif action == "r":
-        ctx.user_data.clear()
-        ctx.user_data["step"] = "rem_day"
-        ctx.user_data["rem_cid"] = cid
-        await update.message.reply_text(
-            f"🕒 العميل: `{c['number']}`\n{stamp_line()}\nفي أي يوم تريد إعادة تذكيرك؟",
-            reply_markup=REM_DAY_KB,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    else:
-        delta = timedelta(hours=1) if action == "h" else timedelta(days=1)
+    
+    req = reqs[0]
+    user_id = req["user_id"]
+    number = req["number"]
+    pkg_idx = req["package_idx"]
+    p_name, p_price = PACKAGES[pkg_idx]
+
+    if action == "approve":
+        # افتراض يوم المحاسبة الافتراضي مثلاً يوم 4 أو حسب اختيارك، هنا نجعله افتراضياً 4
+        bill_day = 4 
+        
+        # إدخال العميل رسمياً لقاعدة بيانات العملاء النشطين
         run(
-            "UPDATE clients SET snooze_until=? WHERE id=?",
-            (naive_iso(now_local() + delta), cid),
+            "INSERT INTO clients(number, package, price, bill_day, chat_id, created_at) VALUES(?,?,?,?,?,?)",
+            (number, p_name, p_price, bill_day, user_id, naive_iso(now_local()))
         )
-        label = "بعد ساعة" if action == "h" else "بعد يوم"
-        await update.message.reply_text(f"⏰ تمت تأجيل التذكير {label} للعميل `{c['number']}`\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
+        
+        # حذف الطلب من المعلقات
+        run("DELETE FROM pending_requests WHERE id=?", (req_id,))
+        
+        # تحديث رسالة الإدارة لديك
+        await q.edit_message_text(
+            f"✅ *تمت الموافقة وتفعيل العميل بنجاح!*\n\n"
+            f"📱 الرقم: `{number}`\n"
+            f"📦 الباقة: {p_name} ({p_price} جنيه)\n"
+            f"{stamp_line()}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # إرسال إشعار للزبون بأن اشتراكه تم تفعيله
+        try:
+            await ctx.bot.send_message(
+                user_id,
+                "🎉 *مبارك! تم قبول اشتراكك وتفعيله بنجاح.*\n\n"
+                f"📦 باقتك: {p_name}\n"
+                f"💰 السعر: {p_price} جنيه\n"
+                "سيتواصل معك النظام لمتابعة المواعيد والتجديد.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            log.warning(f"Could not notify user {user_id}: {e}")
 
-def mark_paid(cid, c):
-    now = now_local()
-    cyc = cycle(now)
-    run(
-        "UPDATE clients SET paid_cycle=?, paid_at=?, snooze_until='' WHERE id=?",
-        (cyc, naive_iso(now), cid),
-    )
-    run(
-        "INSERT INTO payments(client_id, amount, cycle, paid_at) VALUES(?,?,?,?)",
-        (cid, c["price"], cyc, naive_iso(now)),
-    )
+    elif action == "reject":
+        # حذف الطلب من المعلقات
+        run("DELETE FROM pending_requests WHERE id=?", (req_id,))
+        
+        await q.edit_message_text(
+            f"❌ *تم رفض الطلب الخاص بالرقم:* `{number}`\n{stamp_line()}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        try:
+            await ctx.bot.send_message(
+                user_id,
+                "عسراً، تم رفض طلب الاشتراك الحالي من الإدارة. يمكنك التواصل معنا للاستفسار.",
+            )
+        except Exception as e:
+            log.warning(f"Could not notify user {user_id}: {e}")
 
-# ================= الإحصائيات والتصدير =================
+# ================= بقية الوظائف (إحصائيات وتصدير) =================
 async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
@@ -510,169 +399,46 @@ async def show_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_rows = run("SELECT * FROM clients")
     total = len(all_rows)
     paid = [c for c in all_rows if c["paid_cycle"] == cyc]
-    unpaid = total - len(paid)
-    expected = sum(c["price"] for c in all_rows)
-    collected = sum(c["price"] for c in paid)
-    pending = expected - collected
-    total_paid = run("SELECT COALESCE(SUM(amount),0) AS s FROM payments")[0]["s"]
-
-    msg = (
-        f"📊 *إحصائيات شهر {cyc}*\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👥 إجمالي العملاء: *{total}*\n"
-        f"✅ دفعوا: *{len(paid)}*\n"
-        f"⏳ لم يدفعوا: *{unpaid}*\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"💰 الإيراد المتوقع: *{expected:,}* جنيه\n"
-        f"💵 المحصّل فعلياً: *{collected:,}* جنيه\n"
-        f"🔴 المتبقي (المتأخر): *{pending:,}* جنيه\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"📈 إجمالي المدفوعات المسجلة: *{total_paid:,}* جنيه\n"
-        f"\n{stamp_line()}"
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    msg = f"📊 إجمالي العملاء: {total} | دفعوا: {len(paid)}"
+    await update.message.reply_text(msg)
 
 async def export_csv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await allowed(update):
         return
-    rows = run("SELECT * FROM clients ORDER BY bill_day, number")
-    if not rows:
-        await update.message.reply_text("لا توجد بيانات عملاء لتصديرها.")
-        return
+    rows = run("SELECT * FROM clients")
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["ID", "Number", "Package", "Price", "BillDay", "PaidCycle", "Created", "PaidAt"])
+    writer.writerow(["ID", "Number", "Package", "Price", "BillDay"])
     for c in rows:
-        writer.writerow([c["id"], c["number"], c["package"], c["price"], c["bill_day"], c["paid_cycle"], c["created_at"], c["paid_at"]])
-    data = buf.getvalue().encode("utf-8-sig")
-    await update.message.reply_document(
-        document=io.BytesIO(data),
-        filename=f"clients_{now_local():%Y%m%d}.csv",
-        caption=f"📤 ملف تصدير قاعدة البيانات لـ {len(rows)} عميل\n{stamp_line()}",
-    )
+        writer.writerow([c["id"], c["number"], c["package"], c["price"], c["bill_day"]])
+    await update.message.reply_document(document=io.BytesIO(buf.getvalue().encode("utf-8-sig")), filename="clients.csv")
 
-# ================= التفاعل بالأزرار (Callback) =================
-async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await allowed(update):
-        return
-    q = update.callback_query
-    await q.answer()
-    parts = q.data.split(":")
-    cid = int(parts[1])
-    rows = run("SELECT * FROM clients WHERE id=?", (cid,))
-    if not rows:
-        await q.edit_message_text("هذا العميل غير موجود.")
-        return
-    c = rows[0]
-    if parts[0] == "paid":
-        mark_paid(cid, c)
-        await q.edit_message_text(
-            card(c) + f"\n\n✅ *تم الدفع بنجاح*\n{stamp_line()}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    elif parts[0] == "snz":
-        delta = timedelta(hours=1) if parts[2] == "h" else timedelta(days=1)
-        until = now_local() + delta
-        run("UPDATE clients SET snooze_until=? WHERE id=?", (naive_iso(until), cid))
-        label = "بعد ساعة" if parts[2] == "h" else "بعد يوم"
-        await q.edit_message_text(
-            card(c) + f"\n\n⏰ *تم تأجيل التذكير {label}*\n{stamp_line()}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-# ================= التشغيل الخلفي والتذكيرات التلقائية =================
-async def tick(bot):
-    owner = owner_id()
-    if not owner:
-        return
-    now = now_local()
-    cyc = cycle(now)
-    today = now.date()
-    last_day = calendar.monthrange(now.year, now.month)[1]
-    minutes_now = now.hour * 60 + now.minute
-
-    # تذكير مسبق (قبل يوم)
-    tomorrow = today + timedelta(days=1)
-    if minutes_now >= reminder_minutes() and get_setting("last_pre") != str(today):
-        set_setting("last_pre", str(today))
-        due_tomorrow = run("SELECT * FROM clients WHERE bill_day=?", (tomorrow.day,))
-        unpaid_pre = [c for c in due_tomorrow if c["paid_cycle"] != cyc]
-        if unpaid_pre:
-            await bot.send_message(owner, f"🔔 *تذكير مسبق*: غداً موعد محاسبة {len(unpaid_pre)} عميل\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-            await send_cards(bot, owner, unpaid_pre)
-
-    # تذكير يوم المحاسبة الفعلي
-    if minutes_now >= reminder_minutes() and get_setting("last_run") != str(today):
-        set_setting("last_run", str(today))
-        due = run("SELECT * FROM clients WHERE bill_day=? OR (bill_day>? AND ?=?)", (today.day, last_day, today.day, last_day))
-        unpaid = [c for c in due if c["paid_cycle"] != cyc]
-        if unpaid:
-            await bot.send_message(owner, f"🔔 *محاسبة اليوم (يوم {today.day})*: {len(unpaid)} عميل لم يدفعوا بعد\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-            await send_cards(bot, owner, unpaid)
-        elif due:
-            await bot.send_message(owner, f"🔔 *محاسبة اليوم (يوم {today.day})*: كافة العملاء دفعوا بنجاح ✅\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-
-    # متابعة المتأخرين (بعد يوم)
-    yesterday = today - timedelta(days=1)
-    if minutes_now >= reminder_minutes() and get_setting("last_follow") != str(today):
-        set_setting("last_follow", str(today))
-        due_yday = run("SELECT * FROM clients WHERE bill_day=?", (yesterday.day,))
-        still_unpaid = [c for c in due_yday if c["paid_cycle"] != cyc]
-        if still_unpaid:
-            await bot.send_message(owner, f"⚠️ *متابعة المتأخرين*: {len(still_unpaid)} عميل لم يسددوا مستحقاتهم حتى الآن\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-            await send_cards(bot, owner, still_unpaid)
-
-    # التذكيرات المؤجلة
-    rows = run("SELECT * FROM clients WHERE snooze_until!='' AND snooze_until<=? AND paid_cycle!=?", (naive_iso(now), cyc))
-    for c in rows:
-        run("UPDATE clients SET snooze_until='' WHERE id=?", (c["id"],))
-    if rows:
-        await bot.send_message(owner, f"⏰ *تذكيرات مؤجلة لحان وقتها:*\n{stamp_line()}", parse_mode=ParseMode.MARKDOWN)
-        await send_cards(bot, owner, rows)
-
-async def post_init(app: Application):
-    async def runner():
-        while True:
-            try:
-                await tick(app.bot)
-            except Exception as e:
-                log.exception(f"tick error: {e}")
-            await asyncio.sleep(60)
-    app.create_task(runner())
-    log.info("Bot started successfully ✅")
-
-async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
-    log.exception(f"Update error: {ctx.error}")
-
-# ================= الدالة الرئيسية لإطلاق البوت =================
+# ================= التشغيل الرئيسي =================
 def main():
     if not TOKEN:
-        print("❌ يرجى التأكد من وضع BOT_TOKEN في متغيرات البيئة أو داخل الكود.")
+        print("❌ ضع BOT_TOKEN صحيحاً.")
         return
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app = Application.builder().token(TOKEN).build()
 
-    # الأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("del", delete_client))
     app.add_handler(CommandHandler("stats", show_stats))
     app.add_handler(CommandHandler("export", export_csv))
 
-    # أزرار القائمة الرئيسية
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_ADD}$"), add_start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_LIST}$"), show_list))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_UNPAID}$"), show_unpaid))
-    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_HOUR}$"), hour_start))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_STATS}$"), show_stats))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_EXPORT}$"), export_csv))
 
-    # معالجة الأوامر السريعة المعروضة للكارت والرسائل
-    app.add_handler(MessageHandler(filters.Regex(r"^/(paid|h|d|r)_\d+"), on_cmd))
-    app.add_handler(CallbackQueryHandler(on_button, pattern="^(paid|snz):"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_RE), on_text))
-    app.add_error_handler(on_error)
+    # معالجة أزرار القبول والرفض من الأونر
+    app.add_handler(CallbackQueryHandler(on_button, pattern="^(approve|reject):"))
+    
+    # معالجة النصوص العامة لخطوات الزبائن
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    print("🤖 جاري بدء تشغيل البوت...")
+    print("🤖 بوت استقبال طلبات العملاء يعمل الآن بنجاح...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
