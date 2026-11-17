@@ -32,8 +32,7 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "8853934310:AAHQ0FEd7oECal5f3sdd61MeD_gvRyBhsZ4").strip()
 
 # ⚠️ هام جداً: ضع رقم الـ ID الخاص بك هنا مباشرة (بدلاً من 0) لضمان وصول الإشعارات لك
-OWNER_ID = int(os.getenv("8949099540", "ضع_رقم_الآيدي_هنا_إذا_لم تستخدم_env")) 
-# مثال: OWNER_ID = 123456789
+OWNER_ID ="8949099540"
 
 TZ = ZoneInfo("Africa/Cairo")
 DB_FILE = os.getenv("DB_FILE", "clients.db")
