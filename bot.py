@@ -8,7 +8,7 @@
     pip install "python-telegram-bot[job-queue]>=21" python-dotenv
 
 ملف .env:
-    BOT_TOKEN=توكن_البوت
+    BOT_TOKEN= "9065174452:AAHROsaMzGQ5ZPHjwBUiO10mgA5T3HGSuTY"
     OWNER_ID= "8949099540"
     DB_FILE=clients.db   (اختياري)
 """
